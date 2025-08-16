@@ -70,4 +70,26 @@ pub mod common {
         println!("All Nodes -> {:?}", res);
         Ok(res)
     }
+
+    use axum::{http::StatusCode, response::IntoResponse};
+    use std::borrow::Cow;
+    use tower::BoxError;
+
+    pub async fn handle_error(error: BoxError) -> impl IntoResponse {
+        if error.is::<tower::timeout::error::Elapsed>() {
+            return (StatusCode::REQUEST_TIMEOUT, Cow::from("request timed out"));
+        }
+
+        if error.is::<tower::load_shed::error::Overloaded>() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Cow::from("service is overloaded, try again later"),
+            );
+        }
+
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Cow::from(format!("Unhandled internal error: {error}")),
+        )
+    }
 }

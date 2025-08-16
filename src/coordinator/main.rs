@@ -1,6 +1,25 @@
+use axum::{
+    Router,
+    body::Bytes,
+    error_handling::HandleErrorLayer,
+    extract::{Json, State},
+    http::StatusCode,
+    routing::{get, post},
+};
 use std::net::Ipv4Addr;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
+use tower::ServiceBuilder;
+use tower_http::trace::TraceLayer;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tupac_rs::common::{NodeInfo, handle_error};
+use uuid::Uuid;
 
-use tupac_rs::common::{NodeInfo, NodeType, register_with_sdmon};
+use clap::Parser;
+use tupac_rs::common::{NodeType, register_with_sdmon};
 
 // Create an in-memory state for the coordinator
 // Requests come in from the external clients, and we process them
@@ -23,18 +42,49 @@ struct Txn {
     state: CommitState,
 }
 
+#[derive(Default)]
+struct AppState {
+    db: HashMap<Uuid, NodeInfo>,
+}
+
+type SharedState = Arc<RwLock<AppState>>;
+
+async fn ping(State(state): State<SharedState>) -> String {
+    String::from("pong")
+}
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[arg(long)]
+    port: u16,
+
+    #[arg(long)]
+    sdmon_ip: String,
+
+    #[arg(long)]
+    sdmon_port: u16,
+}
+
 #[tokio::main]
 async fn main() {
     println!("Hello, coordinator");
 
     // Accept CLI Arguments for port and IP address
-    let port: u16 = 3001;
-    let ip: String = "127.0.0.1".to_string();
+    let args = Args::parse();
+    let port: u16 = args.port;
+    let ip: String = local_ip_address::local_ip().unwrap().to_string();
+    println!("Starting Coordinator at {}:{}", ip, port);
 
+    /*
+    BOOTSTRAP Phase
+    */
     let client = reqwest::Client::new();
-    let sdmon_ip = std::net::SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3000);
+    let sdmon_ipv4 = args.sdmon_ip.parse::<Ipv4Addr>().unwrap();
+    let sdmon_ip = std::net::SocketAddrV4::new(sdmon_ipv4, args.sdmon_port);
     let node_type = tupac_rs::common::NodeType::Coordinator;
 
+    // dial into SDMON to register self
     let uuid = register_with_sdmon(sdmon_ip, &client, ip, port, node_type)
         .await
         .unwrap();
@@ -52,6 +102,43 @@ async fn main() {
         .cloned()
         .collect();
     println!("Client Nodes: {:?}", clients);
-    // dial into SDMON to register self
+
+    /*
+    Start the server
+    */
+
+    // add tracing support
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                format!("{}=debug,tower_http=debug", env!("CARGO_CRATE_NAME")).into()
+            }),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    let shared_state = SharedState::default();
+
+    // Build our application by composing routes
+    let app = Router::new()
+        .route("/ping", get(ping))
+        // Add middleware to all routes
+        .layer(
+            ServiceBuilder::new()
+                // Handle errors from middleware
+                .layer(HandleErrorLayer::new(handle_error))
+                .load_shed()
+                .concurrency_limit(1024)
+                .timeout(Duration::from_secs(10))
+                .layer(TraceLayer::new_for_http()),
+        )
+        .with_state(Arc::clone(&shared_state));
+
+    // Run our app with hyper
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    tracing::debug!("listening on {}", listener.local_addr().unwrap());
+    axum::serve(listener, app).await.unwrap();
     // start server to accept client requests
 }

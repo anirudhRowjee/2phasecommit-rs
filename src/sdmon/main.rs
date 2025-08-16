@@ -10,23 +10,20 @@ Allow for health checks
 
 use axum::{
     Router,
-    body::Bytes,
     error_handling::HandleErrorLayer,
-    extract::{Json, Path, State},
+    extract::{Json, State},
     http::StatusCode,
-    response::IntoResponse,
     routing::{get, post},
 };
 use std::{
-    borrow::Cow,
     collections::HashMap,
     sync::{Arc, RwLock},
     time::Duration,
 };
-use tower::{BoxError, ServiceBuilder};
+use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use tupac_rs::common::{NodeInfo, RegisterNodeRequest};
+use tupac_rs::common::{NodeInfo, RegisterNodeRequest, handle_error};
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -64,24 +61,6 @@ async fn list_keys(State(state): State<SharedState>) -> Json<Vec<NodeInfo>> {
     let db = &state.read().unwrap().db;
     let db_vec = db.values().cloned().collect::<Vec<NodeInfo>>();
     axum::Json::from(db_vec)
-}
-
-async fn handle_error(error: BoxError) -> impl IntoResponse {
-    if error.is::<tower::timeout::error::Elapsed>() {
-        return (StatusCode::REQUEST_TIMEOUT, Cow::from("request timed out"));
-    }
-
-    if error.is::<tower::load_shed::error::Overloaded>() {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Cow::from("service is overloaded, try again later"),
-        );
-    }
-
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Cow::from(format!("Unhandled internal error: {error}")),
-    )
 }
 
 #[tokio::main]
