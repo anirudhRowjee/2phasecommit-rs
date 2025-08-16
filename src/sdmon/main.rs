@@ -9,13 +9,13 @@ Allow for health checks
 */
 
 use axum::{
-    body::Bytes, 
-    error_handling::HandleErrorLayer, 
-    extract::{Path, State, Json}, 
-    http::StatusCode, 
-    response::IntoResponse, 
-    routing::{post, get}, 
-    Router
+    Router,
+    body::Bytes,
+    error_handling::HandleErrorLayer,
+    extract::{Json, Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
 };
 use std::{
     borrow::Cow,
@@ -24,22 +24,14 @@ use std::{
     time::Duration,
 };
 use tower::{BoxError, ServiceBuilder};
-use tower_http::{
-    trace::TraceLayer
-};
+use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-use serde::Deserialize;
-#[derive(Deserialize)]
-struct RegisterNodeRequest {
-    ip: String,
-    port: u16, 
-}
-
+use tupac_rs::common::{NodeInfo, RegisterNodeRequest};
+use uuid::Uuid;
 
 #[derive(Default)]
 struct AppState {
-    db: HashMap<String, Bytes>,
+    db: HashMap<Uuid, NodeInfo>,
 }
 
 type SharedState = Arc<RwLock<AppState>>;
@@ -47,25 +39,31 @@ type SharedState = Arc<RwLock<AppState>>;
 async fn register_node(
     State(state): State<SharedState>,
     Json(payload): Json<RegisterNodeRequest>,
-) -> Result<Bytes, StatusCode> {
-
-    // Code inside here can access SharedState
-
+) -> Result<String, StatusCode> {
     println!("Data: {:?}", (&payload.port, &payload.ip));
-    let new_ip = payload.ip.clone();
 
-    state.write().unwrap().db.insert(new_ip, Bytes::new());
+    // Create a new UUID for the node
+    let node_id = Uuid::new_v4();
+    let node_id_internal = node_id.clone();
+    let node_info = NodeInfo {
+        ip: payload.ip.clone(),
+        port: payload.port,
+        alive: true,
+        id: node_id_internal,
+        node_type: payload.node_type.clone(),
+    };
 
-    Ok(Bytes::new())
+    // mutate the internal state to store the node info
+    state.write().unwrap().db.insert(node_id, node_info);
+
+    // return a successful status code
+    Ok(node_id.to_string())
 }
 
-async fn list_keys(State(state): State<SharedState>) -> String {
+async fn list_keys(State(state): State<SharedState>) -> Json<Vec<NodeInfo>> {
     let db = &state.read().unwrap().db;
-
-    db.keys()
-        .map(|key| key.to_string())
-        .collect::<Vec<String>>()
-        .join("\n")
+    let db_vec = db.values().cloned().collect::<Vec<NodeInfo>>();
+    axum::Json::from(db_vec)
 }
 
 async fn handle_error(error: BoxError) -> impl IntoResponse {
@@ -102,8 +100,8 @@ async fn main() {
 
     // Build our application by composing routes
     let app = Router::new()
-        .route( "/register", post(register_node))
-        .route("/listkeys", get(list_keys))
+        .route("/register", post(register_node))
+        .route("/listnodes", get(list_keys))
         // Add middleware to all routes
         .layer(
             ServiceBuilder::new()
