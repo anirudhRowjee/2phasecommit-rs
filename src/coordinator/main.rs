@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
+use tokio::task::JoinSet;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -53,6 +54,35 @@ async fn ping(State(state): State<SharedState>) -> String {
     String::from("pong")
 }
 
+async fn ping_node(client: Arc<reqwest::Client>, node: NodeInfo) -> Result<(), reqwest::Error> {
+    let url = format!("http://{}:{}/ping", node.ip, node.port);
+    let res = client.get(url).send().await?;
+    if res.status() == StatusCode::OK {
+        println!("Node {} is alive", node.id);
+    } else {
+        println!("Node {} is not responding", node.id);
+    }
+    Ok(())
+}
+
+async fn ping_all_nodes(client: Arc<reqwest::Client>, client_nodes: Vec<NodeInfo>) {
+    // asynchronously ping all nodes
+    let mut tasks = JoinSet::new();
+    for node in client_nodes {
+        tasks.spawn(ping_node(Arc::clone(&client), node));
+    }
+    while let Some(res) = tasks.join_next().await {
+        match res {
+            Ok(Ok(())) => println!("Ping successful"),
+            Ok(Err(e)) => eprintln!("Ping failed: {}", e),
+            Err(e) => eprintln!("Task failed: {}", e),
+        }
+    }
+}
+
+// TODO Fill this in
+async fn execute_2pc_transaction() {}
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -79,7 +109,7 @@ async fn main() {
     /*
     BOOTSTRAP Phase
     */
-    let client = reqwest::Client::new();
+    let client = Arc::new(reqwest::Client::new());
     let sdmon_ipv4 = args.sdmon_ip.parse::<Ipv4Addr>().unwrap();
     let sdmon_ip = std::net::SocketAddrV4::new(sdmon_ipv4, args.sdmon_port);
     let node_type = tupac_rs::common::NodeType::Coordinator;
@@ -106,6 +136,9 @@ async fn main() {
     /*
     Start the server
     */
+
+    // Coordinator test: ping all DB Nodes
+    ping_all_nodes(Arc::clone(&client), clients).await;
 
     // add tracing support
     tracing_subscriber::registry()

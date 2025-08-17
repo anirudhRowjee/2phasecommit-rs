@@ -17,14 +17,58 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tupac_rs::common::{NodeInfo, handle_error, register_with_sdmon};
 use uuid::Uuid;
 
+#[derive(Default, Clone, Debug)]
+struct KVPair {
+    key: String,
+    value: String,
+    committed: bool,
+    txn_id: Uuid,
+}
+
 #[derive(Default)]
 struct AppState {
-    db: HashMap<Uuid, NodeInfo>,
+    db: HashMap<Uuid, KVPair>,
 }
+
+// WARN: GPT Slop up ahead
+fn write_record_uncommitted(
+    state: &mut AppState,
+    key: String,
+    value: String,
+    txn_id: Uuid,
+) -> Result<(), String> {
+    if state.db.contains_key(&txn_id) {
+        return Err("Transaction ID already exists".to_string());
+    }
+    let kv_pair = KVPair {
+        key,
+        value,
+        committed: false,
+        txn_id,
+    };
+    state.db.insert(txn_id, kv_pair);
+    Ok(())
+}
+
+fn commit_record(state: &mut AppState, txn_id: Uuid) -> Result<(), String> {
+    if let Some(kv_pair) = state.db.get_mut(&txn_id) {
+        kv_pair.committed = true;
+        Ok(())
+    } else {
+        Err("Transaction ID not found".to_string())
+    }
+}
+
+/*
+TODO
+1. Create request handlers for writing and committing records based on txn ID
+2. Wire up request handlers for writing and committing records with local state
+*/
 
 type SharedState = Arc<RwLock<AppState>>;
 
 async fn ping(State(state): State<SharedState>) -> String {
+    println!("Received ping request");
     String::from("pong")
 }
 
@@ -48,7 +92,7 @@ async fn main() {
     // Accept CLI Arguments for port and IP address
     let args = Args::parse();
     let port: u16 = args.port;
-    let ip: String = local_ip_address::local_ip().unwrap().to_string();
+    let ip: String = Ipv4Addr::LOCALHOST.to_string();
     println!("Starting Client at {}:{}", ip, port);
 
     let client = reqwest::Client::new();
