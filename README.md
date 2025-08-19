@@ -3,7 +3,7 @@
 what it says on the box
 
 ## State of the project
-As of right now, none of the APIs are built out. We only have echo/ping APIs on each node.
+We have in-memory 2-phase commit writes working. We are yet to implement READ COMMITTED, or really, any read APIs on the client nodes.
 
 ## Architecture
 This setup comprises of three different types of services.
@@ -27,8 +27,13 @@ Then we start the coordinator.
 cargo run --bin coordinator --  --sdmon-ip 127.0.0.1 --sdmon-port 3000 --port 3001
 ```
 
-Then within five seconds, we start both clients:
+Then **within five seconds**, we start both clients (or more):
 ```
 cargo run --bin client -- --sdmon-ip 127.0.0.1 --sdmon-port 3000 --port 3002
 cargo run --bin client -- --sdmon-ip 127.0.0.1 --sdmon-port 3000 --port 3003
+```
+
+Now, we can use curl to write some data to the nodes. Try it out for yourself:
+```
+curl -XPOST -H "Content-type: application/json" -d '{"key": "hello", "value": "world"}' 'http://localhost:3001/txn_write' 
 ```
