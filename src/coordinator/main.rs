@@ -6,17 +6,20 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use std::net::Ipv4Addr;
 use std::{
     collections::HashMap,
+    fmt::Write,
     sync::{Arc, RwLock},
     time::Duration,
 };
+use std::{net::Ipv4Addr, os::macos::raw::stat};
 use tokio::task::JoinSet;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use tupac_rs::common::{NodeInfo, handle_error};
+use tupac_rs::common::{
+    CommitRequest, CoordinatorWriteRequest, NodeInfo, WriteUncommittedRequest, handle_error,
+};
 use uuid::Uuid;
 
 use clap::Parser;
@@ -46,6 +49,8 @@ struct Txn {
 #[derive(Default)]
 struct AppState {
     db: HashMap<Uuid, NodeInfo>,
+    client: Arc<reqwest::Client>,
+    latest_client_nodes: Vec<NodeInfo>,
 }
 
 type SharedState = Arc<RwLock<AppState>>;
@@ -80,8 +85,165 @@ async fn ping_all_nodes(client: Arc<reqwest::Client>, client_nodes: Vec<NodeInfo
     }
 }
 
-// TODO Fill this in
-async fn execute_2pc_transaction() {}
+// Function to write to a client node without committing
+async fn write_no_commit(
+    client: Arc<reqwest::Client>,
+    node: NodeInfo,
+    req: WriteUncommittedRequest,
+) -> Result<StatusCode, reqwest::Error> {
+    let url = format!("http://{}:{}/write", node.ip, node.port);
+
+    // Send the write request to the node
+    let res = client.post(url).json(&req).send().await?;
+
+    if res.status() == StatusCode::OK {
+        println!("Node {} has accepted the write", node.id);
+    } else {
+        println!("Node {} is not responding", node.id);
+    }
+    Ok(res.status())
+}
+
+// Function to commit a txn on a client
+async fn write_commit(
+    client: Arc<reqwest::Client>,
+    node: NodeInfo,
+    req: CommitRequest,
+) -> Result<StatusCode, reqwest::Error> {
+    let url = format!("http://{}:{}/commit", node.ip, node.port);
+
+    // Send the write request to the node
+    let res = client.post(url).json(&req).send().await?;
+
+    if res.status() == StatusCode::OK {
+        println!("Node {} has committed the write", node.id);
+    } else {
+        println!("Node {} is not responding", node.id);
+    }
+    Ok(res.status())
+}
+
+async fn run_2pc_txn(
+    client: Arc<reqwest::Client>,
+    client_nodes: Vec<NodeInfo>,
+    req: WriteUncommittedRequest,
+) -> Result<(), axum::Error> {
+    println!("Running 2PC Transaction with request: {:?}", req);
+    let client_nodes_commit = client_nodes.clone();
+
+    /*
+    Request Phase
+    */
+
+    println!("Request Phase: Sending uncommitted writes to all nodes");
+    // in parallel, write without commit to all the nodes in the cluster
+    let mut precommit_tasks = JoinSet::new();
+    let mut client_count = 0;
+
+    for node in client_nodes {
+        precommit_tasks.spawn(write_no_commit(Arc::clone(&client), node, req.clone()));
+        client_count += 1;
+    }
+
+    let quorum = (client_count / 2) + 1;
+    println!("Total clients: {}, Quorum needed: {}", client_count, quorum);
+    let mut vote_yes = 0;
+
+    while let Some(res) = precommit_tasks.join_next().await {
+        match res {
+            Ok(statusRes) => match statusRes {
+                Ok(status) if status == StatusCode::OK => {
+                    vote_yes += 1;
+                    println!("Vote YES from node");
+                }
+                _ => println!("Vote NO from node"),
+            },
+            Err(e) => {
+                eprintln!("Task failed: {}", e);
+            }
+        }
+    }
+
+    // If we have a quorum, we can proceed to commit
+    println!("Votes YES: {}, Quorum: {}", vote_yes, quorum);
+    if (vote_yes < quorum) {
+        println!("Not enough votes to commit, aborting transaction");
+        return Err(axum::Error::new("Not enough votes to commit"));
+    }
+
+    /*
+    Commit Phase
+    */
+    println!("Commit Phase: Sending commit requests to all nodes");
+    let mut commit_tasks = JoinSet::new();
+    let commit_req = CommitRequest { txn_id: req.txn_id };
+    for node in client_nodes_commit {
+        commit_tasks.spawn(write_commit(Arc::clone(&client), node, commit_req.clone()));
+    }
+
+    let mut commit_vote_yes = 0;
+    while let Some(res) = commit_tasks.join_next().await {
+        match res {
+            Ok(statusRes) => match statusRes {
+                Ok(status) if status == StatusCode::OK => {
+                    println!("Commit Vote YES from node");
+                    commit_vote_yes += 1;
+                }
+                _ => println!("Commit Vote NO from node"),
+            },
+            Err(e) => {
+                eprintln!("Task failed: {}", e);
+            }
+        }
+    }
+
+    // If we have a quorum, we can proceed to commit
+    println!("Commit Votes YES: {}, Quorum: {}", commit_vote_yes, quorum);
+    if (commit_vote_yes < quorum) {
+        println!("Not enough votes to commit, aborting transaction");
+        return Err(axum::Error::new("Not enough votes to commit"));
+    }
+
+    Ok(())
+}
+
+async fn execute_2pc_transaction(
+    State(state): State<SharedState>,
+    Json(payload): Json<CoordinatorWriteRequest>,
+) -> Result<(), StatusCode> {
+    // Refresh the list of client nodes from SDMon
+
+    // Create txn UUID
+    let txn_id = Uuid::new_v4();
+    let mut own_request = WriteUncommittedRequest {
+        key: payload.key.clone(),
+        value: payload.value.clone(),
+        txn_id,
+    };
+
+    let client: Arc<reqwest::Client>;
+    let client_nodes: Vec<NodeInfo>;
+
+    // lock under minimal contention so we don't hold the global state lock
+    {
+        let local_state = state.read().unwrap();
+        client = Arc::clone(&local_state.client);
+        client_nodes = local_state.latest_client_nodes.clone();
+    }
+
+    // Run the 2pc transaction and wait for it to complete
+    let res = run_2pc_txn(client, client_nodes, own_request).await;
+    match res {
+        Ok(_) => {
+            println!("2PC Transaction executed successfully");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("2PC Transaction failed: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -138,7 +300,8 @@ async fn main() {
     */
 
     // Coordinator test: ping all DB Nodes
-    ping_all_nodes(Arc::clone(&client), clients).await;
+    let clients_temp = clients.clone();
+    ping_all_nodes(Arc::clone(&client), clients_temp).await;
 
     // add tracing support
     tracing_subscriber::registry()
@@ -152,9 +315,14 @@ async fn main() {
 
     let shared_state = SharedState::default();
 
+    // update the state with the latest known client and nodes
+    shared_state.write().unwrap().client = Arc::clone(&client);
+    shared_state.write().unwrap().latest_client_nodes = clients.clone();
+
     // Build our application by composing routes
     let app = Router::new()
         .route("/ping", get(ping))
+        .route("/txn_write", post(execute_2pc_transaction))
         // Add middleware to all routes
         .layer(
             ServiceBuilder::new()

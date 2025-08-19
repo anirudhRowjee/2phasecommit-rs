@@ -17,6 +17,24 @@ pub mod common {
         pub node_type: NodeType,
     }
 
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct WriteUncommittedRequest {
+        pub key: String,
+        pub value: String,
+        pub txn_id: Uuid,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct CoordinatorWriteRequest {
+        pub key: String,
+        pub value: String,
+    }
+
+    #[derive(Serialize, Deserialize, Debug, Clone)]
+    pub struct CommitRequest {
+        pub txn_id: Uuid,
+    }
+
     #[derive(Default, Clone, Debug, Serialize, Deserialize)]
     pub struct NodeInfo {
         pub ip: String,

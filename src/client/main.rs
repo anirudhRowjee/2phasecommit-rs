@@ -1,20 +1,23 @@
 use axum::{
-    Router,
+    Json, Router,
     error_handling::HandleErrorLayer,
     extract::State,
+    http::StatusCode,
     routing::{get, post},
 };
 use clap::Parser;
-use std::net::Ipv4Addr;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
     time::Duration,
 };
+use std::{fmt::Write, net::Ipv4Addr};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use tupac_rs::common::{NodeInfo, handle_error, register_with_sdmon};
+use tupac_rs::common::{
+    CommitRequest, NodeInfo, WriteUncommittedRequest, handle_error, register_with_sdmon,
+};
 use uuid::Uuid;
 
 #[derive(Default, Clone, Debug)]
@@ -30,46 +33,51 @@ struct AppState {
     db: HashMap<Uuid, KVPair>,
 }
 
-// WARN: GPT Slop up ahead
-fn write_record_uncommitted(
-    state: &mut AppState,
-    key: String,
-    value: String,
-    txn_id: Uuid,
-) -> Result<(), String> {
-    if state.db.contains_key(&txn_id) {
-        return Err("Transaction ID already exists".to_string());
-    }
-    let kv_pair = KVPair {
-        key,
-        value,
-        committed: false,
-        txn_id,
-    };
-    state.db.insert(txn_id, kv_pair);
-    Ok(())
-}
-
-fn commit_record(state: &mut AppState, txn_id: Uuid) -> Result<(), String> {
-    if let Some(kv_pair) = state.db.get_mut(&txn_id) {
-        kv_pair.committed = true;
-        Ok(())
-    } else {
-        Err("Transaction ID not found".to_string())
-    }
-}
-
-/*
-TODO
-1. Create request handlers for writing and committing records based on txn ID
-2. Wire up request handlers for writing and committing records with local state
-*/
-
 type SharedState = Arc<RwLock<AppState>>;
 
 async fn ping(State(state): State<SharedState>) -> String {
     println!("Received ping request");
     String::from("pong")
+}
+
+async fn write_records_uncommitted(
+    State(state): State<SharedState>,
+    Json(payload): Json<WriteUncommittedRequest>,
+) -> Result<String, StatusCode> {
+    println!("Recieved uncommitted write request: {:?}", payload);
+
+    let write_object = KVPair {
+        key: payload.key,
+        value: payload.value,
+        committed: false,
+        txn_id: payload.txn_id,
+    };
+    // lock the local state and insert the object
+    state
+        .write()
+        .unwrap()
+        .db
+        .insert(payload.txn_id, write_object);
+
+    Ok("Write uncommitted successful".to_string())
+}
+
+async fn commit_txn(
+    State(state): State<SharedState>,
+    Json(payload): Json<CommitRequest>,
+) -> Result<String, StatusCode> {
+    println!("Recieved commit request: {:?}", payload);
+
+    {
+        let mut wlock = state.write().unwrap();
+        let present = wlock.db.get_mut(&payload.txn_id);
+        match present {
+            Some(key) => key.committed = true,
+            None => return Err(StatusCode::BAD_REQUEST),
+        }
+    }
+
+    Ok("Commit successful".to_string())
 }
 
 #[derive(Parser, Debug)]
@@ -127,6 +135,8 @@ async fn main() {
 
     // Build our application by composing routes
     let app = Router::new()
+        .route("/write", post(write_records_uncommitted))
+        .route("/commit", post(commit_txn))
         .route("/ping", get(ping))
         // Add middleware to all routes
         .layer(
