@@ -37,3 +37,8 @@ Now, we can use curl to write some data to the nodes. Try it out for yourself:
 ```
 curl -XPOST -H "Content-type: application/json" -d '{"key": "hello", "value": "world"}' 'http://localhost:3001/txn_write' 
 ```
+
+To read data from a node (currently, we can only read committed data):
+```
+curl 'http://localhost:3002/readcommitted' 
+```

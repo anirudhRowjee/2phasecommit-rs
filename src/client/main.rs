@@ -6,21 +6,20 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
+use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
     time::Duration,
 };
-use std::{fmt::Write, net::Ipv4Addr};
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use tupac_rs::common::{
-    CommitRequest, NodeInfo, WriteUncommittedRequest, handle_error, register_with_sdmon,
-};
+use tupac_rs::common::{CommitRequest, WriteUncommittedRequest, handle_error, register_with_sdmon};
 use uuid::Uuid;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
 struct KVPair {
     key: String,
     value: String,
@@ -35,7 +34,7 @@ struct AppState {
 
 type SharedState = Arc<RwLock<AppState>>;
 
-async fn ping(State(state): State<SharedState>) -> String {
+async fn ping(State(_): State<SharedState>) -> String {
     println!("Received ping request");
     String::from("pong")
 }
@@ -59,7 +58,24 @@ async fn write_records_uncommitted(
         .db
         .insert(payload.txn_id, write_object);
 
+    println!("Sleeping for 5s..");
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
     Ok("Write uncommitted successful".to_string())
+}
+
+// Function to read all the key-value pairs that have been committed
+async fn read_committed(State(state): State<SharedState>) -> Result<Json<Vec<KVPair>>, StatusCode> {
+    let kvpairs: Vec<KVPair> = state
+        .read()
+        .unwrap()
+        .db
+        .values()
+        .cloned()
+        .into_iter()
+        .filter(|kvpair| kvpair.committed == true)
+        .collect();
+    Ok(axum::Json::from(kvpairs))
 }
 
 async fn commit_txn(
@@ -138,6 +154,7 @@ async fn main() {
         .route("/write", post(write_records_uncommitted))
         .route("/commit", post(commit_txn))
         .route("/ping", get(ping))
+        .route("/readcommitted", get(read_committed))
         // Add middleware to all routes
         .layer(
             ServiceBuilder::new()

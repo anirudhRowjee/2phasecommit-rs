@@ -1,18 +1,15 @@
 use axum::{
     Router,
-    body::Bytes,
     error_handling::HandleErrorLayer,
     extract::{Json, State},
     http::StatusCode,
     routing::{get, post},
 };
+use std::net::Ipv4Addr;
 use std::{
-    collections::HashMap,
-    fmt::Write,
     sync::{Arc, RwLock},
     time::Duration,
 };
-use std::{net::Ipv4Addr, os::macos::raw::stat};
 use tokio::task::JoinSet;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
@@ -30,32 +27,15 @@ use tupac_rs::common::{NodeType, register_with_sdmon};
 
 // refresh global node state once at the beginning of every 2PC initialization
 
-// FSM to track status of the algorithm
-enum CommitState {
-    TxnBegin,
-    PrepareSending,
-    PrepareRecieving,
-    CommitDecision,
-    CommitSending,
-    CommitReceieving,
-    TxnEnd,
-}
-
-// tracker object for in-flight transaction
-struct Txn {
-    state: CommitState,
-}
-
 #[derive(Default)]
 struct AppState {
-    db: HashMap<Uuid, NodeInfo>,
     client: Arc<reqwest::Client>,
     latest_client_nodes: Vec<NodeInfo>,
 }
 
 type SharedState = Arc<RwLock<AppState>>;
 
-async fn ping(State(state): State<SharedState>) -> String {
+async fn ping(State(_): State<SharedState>) -> String {
     String::from("pong")
 }
 
@@ -151,7 +131,7 @@ async fn run_2pc_txn(
 
     while let Some(res) = precommit_tasks.join_next().await {
         match res {
-            Ok(statusRes) => match statusRes {
+            Ok(status_res) => match status_res {
                 Ok(status) if status == StatusCode::OK => {
                     vote_yes += 1;
                     println!("Vote YES from node");
@@ -166,7 +146,7 @@ async fn run_2pc_txn(
 
     // If we have a quorum, we can proceed to commit
     println!("Votes YES: {}, Quorum: {}", vote_yes, quorum);
-    if (vote_yes < quorum) {
+    if vote_yes < quorum {
         println!("Not enough votes to commit, aborting transaction");
         return Err(axum::Error::new("Not enough votes to commit"));
     }
@@ -184,7 +164,7 @@ async fn run_2pc_txn(
     let mut commit_vote_yes = 0;
     while let Some(res) = commit_tasks.join_next().await {
         match res {
-            Ok(statusRes) => match statusRes {
+            Ok(status_res) => match status_res {
                 Ok(status) if status == StatusCode::OK => {
                     println!("Commit Vote YES from node");
                     commit_vote_yes += 1;
@@ -199,7 +179,7 @@ async fn run_2pc_txn(
 
     // If we have a quorum, we can proceed to commit
     println!("Commit Votes YES: {}, Quorum: {}", commit_vote_yes, quorum);
-    if (commit_vote_yes < quorum) {
+    if commit_vote_yes < quorum {
         println!("Not enough votes to commit, aborting transaction");
         return Err(axum::Error::new("Not enough votes to commit"));
     }
@@ -215,7 +195,7 @@ async fn execute_2pc_transaction(
 
     // Create txn UUID
     let txn_id = Uuid::new_v4();
-    let mut own_request = WriteUncommittedRequest {
+    let own_request = WriteUncommittedRequest {
         key: payload.key.clone(),
         value: payload.value.clone(),
         txn_id,
